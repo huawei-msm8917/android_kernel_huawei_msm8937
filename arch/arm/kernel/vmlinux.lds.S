@@ -11,7 +11,7 @@
 #ifdef CONFIG_ARM_KERNMEM_PERMS
 #include <asm/pgtable.h>
 #endif
-	
+
 #define PROC_INFO							\
 	. = ALIGN(4);							\
 	VMLINUX_SYMBOL(__proc_info_begin) = .;				\
@@ -123,8 +123,6 @@ SECTIONS
 #ifdef CONFIG_DEBUG_RODATA
 	. = ALIGN(1<<SECTION_SHIFT);
 #endif
-	_etext = .;			/* End of text section */
-
 	RO_DATA(PAGE_SIZE)
 
 	. = ALIGN(4);
@@ -154,6 +152,8 @@ SECTIONS
 #endif
 
 	NOTES
+
+	_etext = .;			/* End of text and rodata section */
 
 #ifndef CONFIG_XIP_KERNEL
 # ifdef CONFIG_ARM_KERNMEM_PERMS
@@ -261,7 +261,6 @@ SECTIONS
 		. = ALIGN(PAGE_SIZE);
 		__init_end = .;
 #endif
-
 		NOSAVE_DATA
 		CACHELINE_ALIGNED_DATA(L1_CACHE_BYTES)
 		READ_MOSTLY_DATA(L1_CACHE_BYTES)
@@ -276,6 +275,12 @@ SECTIONS
 	}
 	_edata_loc = __data_loc + SIZEOF(.data);
 
+        . = ALIGN(32);
+        __start_hwlog_tag = .;
+        __start_hwlog_tag : {
+                *(__hwlog_tag)
+        }
+        __stop_hwlog_tag = .;
 #ifdef CONFIG_HAVE_TCM
         /*
 	 * We align everything to a page boundary so we can

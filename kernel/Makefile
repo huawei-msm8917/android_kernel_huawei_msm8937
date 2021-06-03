@@ -17,17 +17,6 @@ CFLAGS_REMOVE_cgroup-debug.o = -pg
 CFLAGS_REMOVE_irq_work.o = -pg
 endif
 
-# Prevents flicker of uninteresting __do_softirq()/__local_bh_disable_ip()
-# in coverage traces.
-KCOV_INSTRUMENT_softirq.o := n
-# These are called from save_stack_trace() on slub debug path,
-# and produce insane amounts of uninteresting coverage.
-KCOV_INSTRUMENT_module.o := n
-KCOV_INSTRUMENT_extable.o := n
-# Don't self-instrument.
-KCOV_INSTRUMENT_kcov.o := n
-KASAN_SANITIZE_kcov.o := n
-
 # cond_syscall is currently not LTO compatible
 CFLAGS_sys_ni.o = $(DISABLE_LTO)
 
@@ -63,6 +52,7 @@ obj-$(CONFIG_BACKTRACE_SELF_TEST) += backtracetest.o
 obj-$(CONFIG_COMPAT) += compat.o
 obj-$(CONFIG_CGROUPS) += cgroup.o
 obj-$(CONFIG_CGROUP_FREEZER) += cgroup_freezer.o
+obj-$(CONFIG_CGROUP_PIDS) += cgroup_pids.o
 obj-$(CONFIG_CPUSETS) += cpuset.o
 obj-$(CONFIG_UTS_NS) += utsname.o
 obj-$(CONFIG_USER_NS) += user_namespace.o
@@ -76,7 +66,6 @@ obj-$(CONFIG_AUDITSYSCALL) += auditsc.o
 obj-$(CONFIG_AUDIT_WATCH) += audit_watch.o
 obj-$(CONFIG_AUDIT_TREE) += audit_tree.o
 obj-$(CONFIG_GCOV_KERNEL) += gcov/
-obj-$(CONFIG_KCOV) += kcov.o
 obj-$(CONFIG_KPROBES) += kprobes.o
 obj-$(CONFIG_KGDB) += debug/
 obj-$(CONFIG_DETECT_HUNG_TASK) += hung_task.o
@@ -108,6 +97,7 @@ obj-$(CONFIG_CRASH_DUMP) += crash_dump.o
 obj-$(CONFIG_JUMP_LABEL) += jump_label.o
 obj-$(CONFIG_CONTEXT_TRACKING) += context_tracking.o
 obj-$(CONFIG_TORTURE_TEST) += torture.o
+obj-$(CONFIG_HW_CGROUP_PIDS) += cgroup_huawei/
 
 $(obj)/configs.o: $(obj)/config_data.h
 
@@ -136,7 +126,7 @@ $(obj)/config_data.h: $(obj)/config_data.gz FORCE
 ###############################################################################
 ifeq ($(CONFIG_SYSTEM_TRUSTED_KEYRING),y)
 X509_CERTIFICATES-y := $(wildcard *.x509) $(wildcard $(srctree)/*.x509)
-X509_CERTIFICATES-$(CONFIG_MODULE_SIG) += $(objtree)/signing_key.x509
+X509_CERTIFICATES-$(CONFIG_MODULE_SIG) += signing_key.x509
 X509_CERTIFICATES-raw := $(sort $(foreach CERT,$(X509_CERTIFICATES-y), \
 				$(or $(realpath $(CERT)),$(CERT))))
 X509_CERTIFICATES := $(subst $(realpath $(objtree))/,,$(X509_CERTIFICATES-raw))

@@ -44,7 +44,6 @@
 #include <linux/personality.h>
 #include <linux/notifier.h>
 
-#include <asm/alternative.h>
 #include <asm/compat.h>
 #include <asm/cacheflush.h>
 #include <asm/fpsimd.h>
@@ -58,6 +57,14 @@ unsigned long __stack_chk_guard __read_mostly;
 EXPORT_SYMBOL(__stack_chk_guard);
 #endif
 
+void soft_restart(unsigned long addr)
+{
+	setup_mm_for_reboot();
+	cpu_soft_restart(virt_to_phys(cpu_reset), addr);
+	/* Should never get here */
+	BUG();
+}
+
 /*
  * Function pointers to optional machine specific functions
  */
@@ -65,6 +72,7 @@ void (*pm_power_off)(void);
 EXPORT_SYMBOL_GPL(pm_power_off);
 
 void (*arm_pm_restart)(enum reboot_mode reboot_mode, const char *cmd);
+EXPORT_SYMBOL_GPL(arm_pm_restart);
 
 /*
  * This is our default idle handler.
@@ -77,6 +85,16 @@ void arch_cpu_idle(void)
 	 */
 	cpu_do_idle();
 	local_irq_enable();
+}
+
+void arch_cpu_idle_enter(void)
+{
+	idle_notifier_call_chain(IDLE_START);
+}
+
+void arch_cpu_idle_exit(void)
+{
+	idle_notifier_call_chain(IDLE_END);
 }
 
 #ifdef CONFIG_HOTPLUG_CPU
@@ -128,7 +146,9 @@ void machine_power_off(void)
 
 /*
  * Restart requires that the secondary CPUs stop performing any activity
- * while the primary CPU resets the system. Systems with multiple CPUs must
+ * while the primary CPU resets the system. Systems with a single CPU can
+ * use soft_restart() as their machine descriptor's .restart hook, since that
+ * will cause the only available CPU to reset. Systems with multiple CPUs must
  * provide a HW restart implementation, to ensure that all CPUs reset at once.
  * This is required so that any code running after reset on the primary CPU
  * doesn't have to co-ordinate with other CPUs to ensure they aren't still
@@ -202,27 +222,32 @@ static void show_data(unsigned long addr, int nbytes, const char *name)
 
 static void show_extra_register_data(struct pt_regs *regs, int nbytes)
 {
-	mm_segment_t fs;
-	unsigned int i;
-
-	fs = get_fs();
-	set_fs(KERNEL_DS);
-	show_data(regs->pc - nbytes, nbytes * 2, "PC");
-	show_data(regs->regs[30] - nbytes, nbytes * 2, "LR");
-	show_data(regs->sp - nbytes, nbytes * 2, "SP");
-	for (i = 0; i < 30; i++) {
-		char name[4];
-		snprintf(name, sizeof(name), "X%u", i);
-		show_data(regs->regs[i] - nbytes, nbytes * 2, name);
-	}
-	set_fs(fs);
+    mm_segment_t fs;
+    /*AR0005AFIC yuanshuai 20160919 begin */
+    unsigned int i;
+    /*AR0005AFIC yuanshuai 20160919 end */
+    fs = get_fs();
+    set_fs(KERNEL_DS);
+    show_data(regs->pc - nbytes, nbytes * 2, "PC");
+    show_data(regs->regs[30] - nbytes, nbytes * 2, "LR");
+    show_data(regs->sp - nbytes, nbytes * 2, "SP");
+    /*AR0005AFIC yuanshuai 20160919 begin */
+    for (i = 0; i < 30; i++) {
+        char name[4];
+        snprintf(name, sizeof(name), "X%u", i);
+        show_data(regs->regs[i] - nbytes, nbytes * 2, name);
+    }
+    /*AR0005AFIC yuanshuai 20160919 end */
+    set_fs(fs);
 }
 
 void __show_regs(struct pt_regs *regs)
 {
 	int i, top_reg;
 	u64 lr, sp;
-
+	/*AR0005AFIC yuanshuai 20160919 begin */
+	mm_segment_t fs;
+	/*AR0005AFIC yuanshuai 20160919 end */
 	if (compat_user_mode(regs)) {
 		lr = regs->compat_lr;
 		sp = regs->compat_sp;
@@ -244,8 +269,15 @@ void __show_regs(struct pt_regs *regs)
 		if (i % 2 == 0)
 			printk("\n");
 	}
+	/*AR0005AFIC yuanshuai 20160919 begin */
+	fs = get_fs();
+	set_fs(KERNEL_DS);
+	/*AR0005AFIC yuanshuai 20160919 end */
 	if (!user_mode(regs))
 		show_extra_register_data(regs, 128);
+	/*AR0005AFIC yuanshuai 20160919 begin */
+	set_fs(fs);
+	/*AR0005AFIC yuanshuai 20160919 end */
 	printk("\n");
 }
 
@@ -336,9 +368,6 @@ int copy_thread(unsigned long clone_flags, unsigned long stack_start,
 	} else {
 		memset(childregs, 0, sizeof(struct pt_regs));
 		childregs->pstate = PSR_MODE_EL1h;
-		if (IS_ENABLED(CONFIG_ARM64_UAO) &&
-		    cpus_have_cap(ARM64_HAS_UAO))
-			childregs->pstate |= PSR_UAO_BIT;
 		p->thread.cpu_context.x19 = stack_start;
 		p->thread.cpu_context.x20 = stk_sz;
 	}
@@ -374,17 +403,6 @@ static void tls_thread_switch(struct task_struct *next)
 	: : "r" (tpidr), "r" (tpidrro));
 }
 
-/* Restore the UAO state depending on next's addr_limit */
-static void uao_thread_switch(struct task_struct *next)
-{
-	if (IS_ENABLED(CONFIG_ARM64_UAO)) {
-		if (task_thread_info(next)->addr_limit == KERNEL_DS)
-			asm(ALTERNATIVE("nop", SET_PSTATE_UAO(1), ARM64_HAS_UAO));
-		else
-			asm(ALTERNATIVE("nop", SET_PSTATE_UAO(0), ARM64_HAS_UAO));
-	}
-}
-
 /*
  * Thread switching.
  */
@@ -397,7 +415,6 @@ struct task_struct *__switch_to(struct task_struct *prev,
 	tls_thread_switch(next);
 	hw_breakpoint_thread_switch(next);
 	contextidr_thread_switch(next);
-	uao_thread_switch(next);
 
 	/*
 	 * Complete any pending TLB or cache maintenance on this CPU in case

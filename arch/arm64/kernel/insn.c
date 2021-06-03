@@ -77,14 +77,6 @@ bool __kprobes aarch64_insn_is_nop(u32 insn)
 	}
 }
 
-bool aarch64_insn_is_branch_imm(u32 insn)
-{
-	return (aarch64_insn_is_b(insn) || aarch64_insn_is_bl(insn) ||
-		aarch64_insn_is_tbz(insn) || aarch64_insn_is_tbnz(insn) ||
-		aarch64_insn_is_cbz(insn) || aarch64_insn_is_cbnz(insn) ||
-		aarch64_insn_is_bcond(insn));
-}
-
 static DEFINE_SPINLOCK(patch_lock);
 
 static void __kprobes *patch_map(void *addr, int fixmap)
@@ -95,7 +87,8 @@ static void __kprobes *patch_map(void *addr, int fixmap)
 
 	if (module && IS_ENABLED(CONFIG_DEBUG_SET_MODULE_RONX))
 		page = vmalloc_to_page(addr);
-	else if (!module && IS_ENABLED(CONFIG_DEBUG_RODATA))
+	else if (!module && (IS_ENABLED(CONFIG_DEBUG_RODATA) ||
+			IS_ENABLED(CONFIG_KERNEL_TEXT_RDONLY)))
 		page = virt_to_page(addr);
 	else
 		return addr;
@@ -110,6 +103,35 @@ static void __kprobes patch_unmap(int fixmap)
 {
 	clear_fixmap(fixmap);
 }
+
+bool __kprobes aarch64_insn_uses_literal(u32 insn)
+{
+	/* ldr/ldrsw (literal), prfm */
+
+	return aarch64_insn_is_ldr_lit(insn) ||
+		aarch64_insn_is_ldrsw_lit(insn) ||
+		aarch64_insn_is_adr_adrp(insn) ||
+		aarch64_insn_is_prfm_lit(insn);
+}
+
+bool __kprobes aarch64_insn_is_branch(u32 insn)
+{
+	/* b, bl, cb*, tb*, b.cond, br, blr */
+
+	return aarch64_insn_is_b_bl_cb_tb(insn) ||
+		aarch64_insn_is_br_blr(insn) ||
+		aarch64_insn_is_ret(insn) ||
+		aarch64_insn_is_bcond(insn);
+}
+
+bool __kprobes aarch64_insn_is_daif_access(u32 insn)
+{
+	/* msr daif, mrs daif, msr daifset, msr daifclr */
+
+	return aarch64_insn_is_rd_wr_daif(insn) ||
+		aarch64_insn_is_set_clr_daif(insn);
+}
+
 /*
  * In ARMv8-A, A64 instructions have a fixed length of 32 bits and are always
  * little-endian.
@@ -146,7 +168,12 @@ static int __kprobes __aarch64_insn_write(void *addr, u32 insn)
 int __kprobes aarch64_insn_write(void *addr, u32 insn)
 {
 	insn = cpu_to_le32(insn);
+#ifdef CONFIG_STRICT_MEMORY_RWX
+	mem_text_write_kernel_word(addr, insn);
+	return 0;
+#else
 	return __aarch64_insn_write(addr, insn);
+#endif
 }
 
 static bool __kprobes __aarch64_insn_hotpatch_safe(u32 insn)
@@ -273,13 +300,23 @@ int __kprobes aarch64_insn_patch_text(void *addrs[], u32 insns[], int cnt)
 	return aarch64_insn_patch_text_sync(addrs, insns, cnt);
 }
 
-static int __kprobes aarch64_get_imm_shift_mask(enum aarch64_insn_imm_type type,
-						u32 *maskp, int *shiftp)
+u32 __kprobes aarch64_insn_encode_immediate(enum aarch64_insn_imm_type type,
+				  u32 insn, u64 imm)
 {
-	u32 mask;
+	u32 immlo, immhi, lomask, himask, mask;
 	int shift;
 
 	switch (type) {
+	case AARCH64_INSN_IMM_ADR:
+		lomask = 0x3;
+		himask = 0x7ffff;
+		immlo = imm & lomask;
+		imm >>= 2;
+		immhi = imm & himask;
+		imm = (immlo << 24) | (immhi);
+		mask = (lomask << 24) | (himask);
+		shift = 5;
+		break;
 	case AARCH64_INSN_IMM_26:
 		mask = BIT(26) - 1;
 		shift = 0;
@@ -318,68 +355,9 @@ static int __kprobes aarch64_get_imm_shift_mask(enum aarch64_insn_imm_type type,
 		shift = 16;
 		break;
 	default:
-		return -EINVAL;
-	}
-
-	*maskp = mask;
-	*shiftp = shift;
-
-	return 0;
-}
-
-#define ADR_IMM_HILOSPLIT	2
-#define ADR_IMM_SIZE		SZ_2M
-#define ADR_IMM_LOMASK		((1 << ADR_IMM_HILOSPLIT) - 1)
-#define ADR_IMM_HIMASK		((ADR_IMM_SIZE >> ADR_IMM_HILOSPLIT) - 1)
-#define ADR_IMM_LOSHIFT		29
-#define ADR_IMM_HISHIFT		5
-
-u64 aarch64_insn_decode_immediate(enum aarch64_insn_imm_type type, u32 insn)
-{
-	u32 immlo, immhi, mask;
-	int shift;
-
-	switch (type) {
-	case AARCH64_INSN_IMM_ADR:
-		shift = 0;
-		immlo = (insn >> ADR_IMM_LOSHIFT) & ADR_IMM_LOMASK;
-		immhi = (insn >> ADR_IMM_HISHIFT) & ADR_IMM_HIMASK;
-		insn = (immhi << ADR_IMM_HILOSPLIT) | immlo;
-		mask = ADR_IMM_SIZE - 1;
-		break;
-	default:
-		if (aarch64_get_imm_shift_mask(type, &mask, &shift) < 0) {
-			pr_err("aarch64_insn_decode_immediate: unknown immediate encoding %d\n",
-			       type);
-			return 0;
-		}
-	}
-
-	return (insn >> shift) & mask;
-}
-
-u32 __kprobes aarch64_insn_encode_immediate(enum aarch64_insn_imm_type type,
-				  u32 insn, u64 imm)
-{
-	u32 immlo, immhi, mask;
-	int shift;
-
-	switch (type) {
-	case AARCH64_INSN_IMM_ADR:
-		shift = 0;
-		immlo = (imm & ADR_IMM_LOMASK) << ADR_IMM_LOSHIFT;
-		imm >>= ADR_IMM_HILOSPLIT;
-		immhi = (imm & ADR_IMM_HIMASK) << ADR_IMM_HISHIFT;
-		imm = immlo | immhi;
-		mask = ((ADR_IMM_LOMASK << ADR_IMM_LOSHIFT) |
-			(ADR_IMM_HIMASK << ADR_IMM_HISHIFT));
-		break;
-	default:
-		if (aarch64_get_imm_shift_mask(type, &mask, &shift) < 0) {
-			pr_err("aarch64_insn_encode_immediate: unknown immediate encoding %d\n",
-			       type);
-			return 0;
-		}
+		pr_err("aarch64_insn_encode_immediate: unknown immediate encoding %d\n",
+			type);
+		return 0;
 	}
 
 	/* Update the immediate field. */
@@ -1063,58 +1041,6 @@ u32 aarch64_insn_gen_logical_shifted_reg(enum aarch64_insn_register dst,
 	insn = aarch64_insn_encode_register(AARCH64_INSN_REGTYPE_RM, insn, reg);
 
 	return aarch64_insn_encode_immediate(AARCH64_INSN_IMM_6, insn, shift);
-}
-
-/*
- * Decode the imm field of a branch, and return the byte offset as a
- * signed value (so it can be used when computing a new branch
- * target).
- */
-s32 aarch64_get_branch_offset(u32 insn)
-{
-	s32 imm;
-
-	if (aarch64_insn_is_b(insn) || aarch64_insn_is_bl(insn)) {
-		imm = aarch64_insn_decode_immediate(AARCH64_INSN_IMM_26, insn);
-		return (imm << 6) >> 4;
-	}
-
-	if (aarch64_insn_is_cbz(insn) || aarch64_insn_is_cbnz(insn) ||
-	    aarch64_insn_is_bcond(insn)) {
-		imm = aarch64_insn_decode_immediate(AARCH64_INSN_IMM_19, insn);
-		return (imm << 13) >> 11;
-	}
-
-	if (aarch64_insn_is_tbz(insn) || aarch64_insn_is_tbnz(insn)) {
-		imm = aarch64_insn_decode_immediate(AARCH64_INSN_IMM_14, insn);
-		return (imm << 18) >> 16;
-	}
-
-	/* Unhandled instruction */
-	BUG();
-}
-
-/*
- * Encode the displacement of a branch in the imm field and return the
- * updated instruction.
- */
-u32 aarch64_set_branch_offset(u32 insn, s32 offset)
-{
-	if (aarch64_insn_is_b(insn) || aarch64_insn_is_bl(insn))
-		return aarch64_insn_encode_immediate(AARCH64_INSN_IMM_26, insn,
-						     offset >> 2);
-
-	if (aarch64_insn_is_cbz(insn) || aarch64_insn_is_cbnz(insn) ||
-	    aarch64_insn_is_bcond(insn))
-		return aarch64_insn_encode_immediate(AARCH64_INSN_IMM_19, insn,
-						     offset >> 2);
-
-	if (aarch64_insn_is_tbz(insn) || aarch64_insn_is_tbnz(insn))
-		return aarch64_insn_encode_immediate(AARCH64_INSN_IMM_14, insn,
-						     offset >> 2);
-
-	/* Unhandled instruction */
-	BUG();
 }
 
 bool aarch32_insn_is_wide(u32 insn)

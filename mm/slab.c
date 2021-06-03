@@ -129,6 +129,11 @@
 
 #include	"slab.h"
 
+#ifdef CONFIG_DUMP_SLAB_INFO
+#include <linux/module.h>
+#include <linux/srecorder.h>
+#endif
+
 /*
  * DEBUG	- 1 for kmem_cache_create() to honour; SLAB_RED_ZONE & SLAB_POISON.
  *		  0 for faster, smaller code (especially in the critical paths).
@@ -466,6 +471,20 @@ static struct kmem_cache kmem_cache_boot = {
 };
 
 #define BAD_ALIEN_MAGIC 0x01020304ul
+
+#ifdef CONFIG_DUMP_SLAB_INFO
+unsigned long get_slab_mutex(void)
+{
+    return (unsigned long)&slab_mutex;
+}
+EXPORT_SYMBOL(get_slab_mutex);
+
+unsigned long get_slab_caches(void)
+{
+    return (unsigned long)&slab_caches;
+}
+EXPORT_SYMBOL(get_slab_caches);
+#endif
 
 static DEFINE_PER_CPU(struct delayed_work, slab_reap_work);
 
@@ -4213,36 +4232,6 @@ static int __init slab_proc_init(void)
 }
 module_init(slab_proc_init);
 #endif
-
-#ifdef CONFIG_HARDENED_USERCOPY
-/*
- * Rejects objects that are incorrectly sized.
- *
- * Returns NULL if check passes, otherwise const char * to name of cache
- * to indicate an error.
- */
-const char *__check_heap_object(const void *ptr, unsigned long n,
-				struct page *page)
-{
-	struct kmem_cache *cachep;
-	unsigned int objnr;
-	unsigned long offset;
-
-	/* Find and validate object. */
-	cachep = page->slab_cache;
-	objnr = obj_to_index(cachep, page, (void *)ptr);
-	BUG_ON(objnr >= cachep->num);
-
-	/* Find offset within object. */
-	offset = ptr - index_to_obj(cachep, page, objnr) - obj_offset(cachep);
-
-	/* Allow address range falling entirely within object size. */
-	if (offset <= cachep->object_size && n <= cachep->object_size - offset)
-		return NULL;
-
-	return cachep->name;
-}
-#endif /* CONFIG_HARDENED_USERCOPY */
 
 /**
  * ksize - get the actual amount of memory allocated for a given object

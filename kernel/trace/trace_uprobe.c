@@ -806,7 +806,7 @@ static void __uprobe_trace_func(struct trace_uprobe *tu,
 
 	memcpy(data, ucb->buf, tu->tp.size + dsize);
 
-	event_trigger_unlock_commit(ftrace_file, buffer, event, entry, 0, 0);
+	event_trigger_unlock_commit(ftrace_file, buffer, event, entry, 0, 0, 0);
 }
 
 /* uprobe handler */
@@ -1325,7 +1325,7 @@ static __init int init_uprobe_trace(void)
 	struct dentry *d_tracer;
 
 	d_tracer = tracing_init_dentry();
-	if (IS_ERR(d_tracer))
+	if (!d_tracer)
 		return 0;
 
 	trace_create_file("uprobe_events", 0644, d_tracer,

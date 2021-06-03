@@ -138,6 +138,9 @@ void tcp_time_wait(struct sock *sk, int state, int timeo);
 						 * most likely due to retrans in 3WHS.
 						 */
 
+/* Number of full MSS to receive before Acking RFC2581 */
+#define TCP_DELACK_SEG          1
+
 #define TCP_RESOURCE_PROBE_INTERVAL ((unsigned)(HZ/2U)) /* Maximal interval between probes
 					                 * for local resources.
 					                 */
@@ -279,6 +282,11 @@ extern int sysctl_tcp_autocorking;
 extern int sysctl_tcp_default_init_rwnd;
 
 extern atomic_long_t tcp_memory_allocated;
+
+/* sysctl variables for controlling various tcp parameters */
+extern int sysctl_tcp_delack_seg;
+extern int sysctl_tcp_use_userconfig;
+
 extern struct percpu_counter tcp_sockets_allocated;
 extern int tcp_memory_pressure;
 
@@ -343,6 +351,14 @@ extern struct proto tcp_prot;
 #define TCP_ADD_STATS_USER(net, field, val) SNMP_ADD_STATS_USER((net)->mib.tcp_statistics, field, val)
 #define TCP_ADD_STATS(net, field, val)	SNMP_ADD_STATS((net)->mib.tcp_statistics, field, val)
 
+#ifdef CONFIG_HW_WIFIPRO
+#define WIFIPRO_TCP_INC_STATS(net, field)	SNMP_INC_STATS((net)->mib.wifipro_tcp_statistics, field)
+#define WIFIPRO_TCP_INC_STATS_BH(net, field)	SNMP_INC_STATS_BH((net)->mib.wifipro_tcp_statistics, field)
+#define WIFIPRO_TCP_DEC_STATS(net, field)	SNMP_DEC_STATS((net)->mib.wifipro_tcp_statistics, field)
+#define WIFIPRO_TCP_ADD_STATS_USER(net, field, val) SNMP_ADD_STATS_USER((net)->mib.wifipro_tcp_statistics, field, val)
+#define WIFIPRO_TCP_ADD_STATS(net, field, val)	SNMP_ADD_STATS((net)->mib.wifipro_tcp_statistics, field, val)
+#endif
+
 void tcp_tasklet_init(void);
 
 void tcp_v4_err(struct sk_buff *skb, u32);
@@ -372,6 +388,12 @@ void tcp_twsk_destructor(struct sock *sk);
 ssize_t tcp_splice_read(struct socket *sk, loff_t *ppos,
 			struct pipe_inode_info *pipe, size_t len,
 			unsigned int flags);
+
+/* sysctl master controller */
+extern int tcp_use_userconfig_sysctl_handler(struct ctl_table *, int,
+				void __user *, size_t *, loff_t *);
+extern int tcp_proc_delayed_ack_control(struct ctl_table *, int,
+				void __user *, size_t *, loff_t *);
 
 static inline void tcp_dec_quickack_mode(struct sock *sk,
 					 const unsigned int pkts)

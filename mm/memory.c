@@ -2536,7 +2536,8 @@ static int do_swap_page(struct mm_struct *mm, struct vm_area_struct *vma,
 	}
 
 	swap_free(entry);
-	if (vm_swap_full() || (vma->vm_flags & VM_LOCKED) || PageMlocked(page))
+	if ((PageSwapCache(page) && vm_swap_full(page_swap_info(page))) ||
+		(vma->vm_flags & VM_LOCKED) || PageMlocked(page))
 		try_to_free_swap(page);
 	unlock_page(page);
 	if (page != swapcache) {
@@ -2632,7 +2633,6 @@ static int do_anonymous_page(struct mm_struct *mm, struct vm_area_struct *vma,
 	/* File mapping without ->vm_ops ? */
 	if (vma->vm_flags & VM_SHARED)
 		return VM_FAULT_SIGBUS;
-
 	/* Check if we need to add a guard page to the stack */
 	if (check_stack_guard_page(vma, address) < 0)
 		return VM_FAULT_SIGSEGV;
@@ -2769,7 +2769,7 @@ void do_set_pte(struct vm_area_struct *vma, unsigned long address,
 }
 
 static unsigned long fault_around_bytes __read_mostly =
-	rounddown_pow_of_two(65536);
+	rounddown_pow_of_two(4096);
 
 #ifdef CONFIG_DEBUG_FS
 static int fault_around_bytes_get(void *data, u64 *val)
@@ -3205,10 +3205,10 @@ static int handle_pte_fault(struct mm_struct *mm,
 	entry = ACCESS_ONCE(*pte);
 	if (!pte_present(entry)) {
 		if (pte_none(entry)) {
-			if (vma->vm_ops)
-				return do_linear_fault(mm, vma, address,
+			if (vma->vm_ops) {
+					return do_linear_fault(mm, vma, address,
 						pte, pmd, flags, entry);
-
+			}
 			return do_anonymous_page(mm, vma, address,
 						 pte, pmd, flags);
 		}
@@ -3832,4 +3832,8 @@ void ptlock_free(struct page *page)
 {
 	kmem_cache_free(page_ptl_cachep, page->ptl);
 }
+#endif
+
+#ifdef CONFIG_HUAWEI_BOOST_SIGKILL_FREE
+#include "boost_sigkill_free.c"
 #endif

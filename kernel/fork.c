@@ -23,6 +23,7 @@
 #include <linux/file.h>
 #include <linux/fdtable.h>
 #include <linux/iocontext.h>
+#include <linux/kasan.h>
 #include <linux/key.h>
 #include <linux/binfmts.h>
 #include <linux/mman.h>
@@ -74,8 +75,6 @@
 #include <linux/uprobes.h>
 #include <linux/aio.h>
 #include <linux/compiler.h>
-#include <linux/kcov.h>
-
 #include <asm/pgtable.h>
 #include <asm/pgalloc.h>
 #include <asm/uaccess.h>
@@ -87,6 +86,11 @@
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/task.h>
+#ifdef CONFIG_HW_CGROUP_PIDS
+#include <./cgroup_huawei/cgroup_pids.h>
+#endif
+
+#include <../block/blk-cgroup.h>
 
 /*
  * Protected counters by write_lock_irq(&tasklist_lock)
@@ -159,6 +163,7 @@ static struct thread_info *alloc_thread_info_node(struct task_struct *tsk,
 
 static inline void free_thread_info(struct thread_info *ti)
 {
+	kasan_alloc_pages(virt_to_page(ti), THREAD_SIZE_ORDER);
 	free_kmem_pages((unsigned long)ti, THREAD_SIZE_ORDER);
 }
 # else
@@ -370,8 +375,6 @@ static struct task_struct *dup_task_struct(struct task_struct *orig)
 	tsk->task_frag.page = NULL;
 
 	account_kernel_stack(ti, 1);
-
-	kcov_task_init(tsk);
 
 	return tsk;
 
@@ -591,6 +594,9 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p)
 #if defined(CONFIG_TRANSPARENT_HUGEPAGE) && !USE_SPLIT_PMD_PTLOCKS
 	mm->pmd_huge_pte = NULL;
 #endif
+#ifdef CONFIG_TASK_PROTECT_LRU
+	mm->protect = 0;
+#endif
 
 	if (current->mm) {
 		mm->flags = current->mm->flags & MMF_INIT_MASK;
@@ -603,12 +609,24 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p)
 	if (mm_alloc_pgd(mm))
 		goto fail_nopgd;
 
-	if (init_new_context(p, mm))
+#ifdef CONFIG_BLK_DEV_THROTTLING
+	mm->io_limit = kmalloc(sizeof(struct blk_throtl_io_limit), GFP_KERNEL);
+	if (!mm->io_limit)
 		goto fail_nocontext;
+
+	blk_throtl_io_limit_init(mm->io_limit);
+#endif
+
+	if (init_new_context(p, mm))
+		goto fail_io_limit;
 
 	return mm;
 
+fail_io_limit:
+#ifdef CONFIG_BLK_DEV_THROTTLING
+	kfree(mm->io_limit);
 fail_nocontext:
+#endif
 	mm_free_pgd(mm);
 fail_nopgd:
 	free_mm(mm);
@@ -658,6 +676,9 @@ void __mmdrop(struct mm_struct *mm)
 	destroy_context(mm);
 	mmu_notifier_mm_destroy(mm);
 	check_mm(mm);
+#ifdef CONFIG_BLK_DEV_THROTTLING
+	blk_throtl_io_limit_put(mm->io_limit);
+#endif
 	free_mm(mm);
 }
 EXPORT_SYMBOL_GPL(__mmdrop);
@@ -665,8 +686,9 @@ EXPORT_SYMBOL_GPL(__mmdrop);
 /*
  * Decrement the use count and release all resources for an mm.
  */
-void mmput(struct mm_struct *mm)
+int mmput(struct mm_struct *mm)
 {
+	int mm_freed = 0;
 	might_sleep();
 
 	if (atomic_dec_and_test(&mm->mm_users)) {
@@ -684,7 +706,9 @@ void mmput(struct mm_struct *mm)
 		if (mm->binfmt)
 			module_put(mm->binfmt->module);
 		mmdrop(mm);
+		mm_freed = 1;
 	}
+	return mm_freed;
 }
 EXPORT_SYMBOL_GPL(mmput);
 
@@ -1057,7 +1081,7 @@ static void posix_cpu_timers_init_group(struct signal_struct *sig)
 	/* Thread group counters. */
 	thread_group_cputime_init(sig);
 
-	cpu_limit = READ_ONCE(sig->rlim[RLIMIT_CPU].rlim_cur);
+	cpu_limit = ACCESS_ONCE(sig->rlim[RLIMIT_CPU].rlim_cur);
 	if (cpu_limit != RLIM_INFINITY) {
 		sig->cputime_expires.prof_exp = secs_to_cputime(cpu_limit);
 		sig->cputimer.running = 1;
@@ -1278,10 +1302,19 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 	}
 	current->flags &= ~PF_NPROC_EXCEEDED;
 
-	retval = copy_creds(p, clone_flags);
+#ifdef CONFIG_HW_CGROUP_PIDS
+	retval = cgroup_pids_can_fork();
 	if (retval < 0)
 		goto bad_fork_free;
 
+	retval = copy_creds(p, clone_flags);
+	if (retval < 0)
+		goto bad_fork_cleanup_cgroup_pids;
+#else
+	retval = copy_creds(p, clone_flags);
+	if (retval < 0)
+		goto bad_fork_free;
+#endif
 	/*
 	 * If multiple threads are within copy_process(), then this check
 	 * triggers too late. This doesn't hurt, the check is only there
@@ -1375,6 +1408,9 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 #ifdef CONFIG_BCACHE
 	p->sequential_io	= 0;
 	p->sequential_io_avg	= 0;
+#endif
+#ifdef CONFIG_HUAWEI_SWAP_ZDATA
+	p->proc_reclaimed_result = NULL;
 #endif
 
 	/* Perform scheduler related setup. Assign this task to a CPU. */
@@ -1607,6 +1643,10 @@ bad_fork_cleanup_threadgroup_lock:
 bad_fork_cleanup_count:
 	atomic_dec(&p->cred->user->processes);
 	exit_creds(p);
+#ifdef CONFIG_HW_CGROUP_PIDS
+bad_fork_cleanup_cgroup_pids:
+	cgroup_pids_cancel_fork();
+#endif
 bad_fork_free:
 	free_task(p);
 fork_out:
@@ -1692,6 +1732,10 @@ long do_fork(unsigned long clone_flags,
 			init_completion(&vfork);
 			get_task_struct(p);
 		}
+
+#ifdef CONFIG_HUAWEI_UID_IO_STATS
+		profile_task_end_fork(p);
+#endif
 
 		wake_up_new_task(p);
 
